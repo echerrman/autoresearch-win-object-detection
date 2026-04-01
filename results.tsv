@@ -1,2 +1,3 @@
 commit	val_bpb	memory_gb	status	description
 25a94ce	0.596561	11.7	keep	baseline
+6d07d67	0.593414	11.7	keep	keep nonzero final LR (0.1)
