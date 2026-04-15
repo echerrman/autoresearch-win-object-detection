@@ -1,111 +1,380 @@
-# autoresearch
+# ArcGIS Learn Pipeline Autoresearch
 
-> Convert your gaming PC into an autonomous AI researcher.
+Use an AI coding agent to iterate on an `arcgis.learn` object detection pipeline after you have already chosen the baseline model and fixed training parameters.
 
-> This repository is a fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch). The purpose of this fork is native support for desktop consumer NVIDIA GPUs on Windows, with tiered VRAM floors by architecture.
+This repo is for the second half of the workflow:
 
-![teaser](progress.png)
+1. Use Optuna outside this repo to find the model and fixed training recipe you want to start from.
+2. Put that fixed baseline into this repo.
+3. Let an AI agent iterate on constrained pipeline changes one experiment at a time.
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+The target use case is peach detection in orchard imagery, but the structure is reusable for other ArcGIS Learn object detection projects.
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+## What This Repo Does
 
-## Fork scope
+This repo is a guarded research harness for `arcgis.learn`.
 
-- Upstream source: [karpathy/autoresearch](https://github.com/karpathy/autoresearch)
-- Primary objective: run natively on Windows with desktop consumer NVIDIA GPUs (Turing with >=8 GB VRAM, Ampere/Ada/Blackwell with >=10 GB VRAM), without unofficial Triton-on-Windows stacks.
-- Scope of changes: compatibility and stability updates required for that target platform.
-- The original Linux/H100-oriented path from upstream is removed in this fork and is not supported here.
-- If you need the upstream Linux/H100 path, use [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
+It is designed to help an AI agent test pipeline-level changes such as:
 
-## How it works
+- augmentation policy
+- preprocessing and resize strategy
+- post-processing thresholds used for validation scoring
+- `chip_size`
 
-The repo is deliberately kept small and only really has a three files that matter:
+It is not the place where you should broadly search learning rate, batch size, epochs, or baseline model choice. The intended workflow is to choose those first with Optuna, then lock them here.
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads TinyStories data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation).
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+## What You Need Before You Start
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+Bring these with you:
 
-## Quick start (PowerShell)
+- ArcGIS Pro on Windows
+- ArcGIS Pro deep learning dependencies installed
+- access to ArcGIS Pro Python through `propy.bat`
+- an exported training dataset from `Export Training Data For Deep Learning`
+- a baseline model choice and fixed training recipe, ideally selected beforehand with Optuna
 
-**Requirements:** A single NVIDIA GPU, Python 3.10+, [uv](https://docs.astral.sh/uv/).
+At minimum, you should already know:
 
-- Single runtime path uses PyTorch SDPA attention and eager execution (no FA3/`torch.compile` fast path).
-- Native Windows support targets desktop consumer GPUs with a tiered VRAM policy (Turing >=8 GB, Ampere/Ada/Blackwell >=10 GB), official PyTorch CUDA wheels, and SDPA attention.
-- Default dataset is now TinyStories GPT-4 clean for practical consumer-GPU setup.
+- which model family/backbone you want to start from
+- the fixed learning rate
+- the fixed batch size
+- the fixed epoch count
+- the validation split
+
+## How It Works
+
+The repo stays intentionally small:
+
+- [prepare.py](./prepare.py)
+  Validates the ArcGIS environment, your dataset workspace, and the immutable research context.
+- [train.py](./train.py)
+  Runs one fixed `arcgis.learn` training experiment and logs the validation result.
+- [proposal.py](./proposal.py)
+  The only file the AI agent should edit during normal research.
+- [program.md](./program.md)
+  The instruction file you point your coding agent at.
+
+The human sets the guardrails. The agent proposes and tests one major change at a time inside those guardrails.
+
+## Project Layout
+
+```text
+prepare.py
+train.py
+proposal.py
+program.md
+results.tsv
+datasets/<dataset-name>/
+  project_brief.md
+  research_context.json
+  train_export/
+```
+
+- `project_brief.md` is the plain-English description of the detection problem.
+- `research_context.json` is the machine-readable locked context for the run.
+- `train_export/` holds the ArcGIS export workspace.
+
+Run artifacts are written to `.autoresearch/` and ignored by git.
+
+## Quick Start
+
+### 1. Choose the baseline outside this repo
+
+Use Optuna to determine the model and fixed parameters you want to bring into this project.
+
+The normal expectation is:
+
+- Optuna chooses the baseline model family/backbone.
+- Optuna chooses learning rate, batch size, and epochs.
+- This repo treats those choices as fixed.
+
+If you want the AI agent locked to one model only, set `approved_models` in the research context to just that one Optuna-selected option.
+
+### 2. Clone the repo
+
+Open **PowerShell** on Windows, then run:
 
 ```powershell
-
-# 1. Install uv project manager (if you don't already have it)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# 2. Install dependencies
-uv sync
-
-# 3. Download data and train tokenizer (one-time)
-#    Default dataset: TinyStories GPT-4 clean
-uv run prepare.py
-
-# 4. Manually run a single training experiment (~5 min)
-uv run train.py
+git clone https://github.com/echerrman/autoresearch-win-object-detection.git
+cd autoresearch-win-object-detection
 ```
 
-Quick validation run (recommended after setup):
+From this point on, run the rest of the commands from the repo root in **PowerShell** unless stated otherwise.
+
+### 3. Create a dataset workspace
+
+In **PowerShell** or in File Explorer, copy [datasets/example-project](./datasets/example-project/) and rename it to your project name.
+
+```text
+datasets/<dataset-name>/
+  project_brief.md
+  research_context.json
+  train_export/
+```
+
+For our example peach detecting project:
+
+```text
+datasets/peach-orchard-spring-2026/
+  project_brief.md
+  research_context.json
+  train_export/
+```
+
+PowerShell example:
 
 ```powershell
-uv run train.py --smoke-test
+Copy-Item -Recurse .\datasets\example-project .\datasets\peach-orchard-spring-2026
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+### 4. Drop in your ArcGIS export
 
-## Running the agent
+In **ArcGIS Pro**, run `Export Training Data For Deep Learning` as you normally would. After it finishes, copy the exported training-data workspace into your project folder.
 
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
+Target folder in this repo:
 
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
-```
-
-The `program.md` file is essentially a super lightweight "skill".
-
-## Project structure
-
-```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
+```text
+datasets/<dataset-name>/train_export/
 ```
 
-## Design choices
+For our example peach detecting project:
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+```text
+datasets/peach-orchard-spring-2026/train_export/
+```
 
-## Platform support
+If your ArcGIS export already contains folders and files such as `images`, `labels`, and metadata files, copy those contents into `train_export/`.
 
-This fork's platform policy is explicit and tiered.
+### 5. Fill in the two project files
 
-| Architecture | Minimum VRAM floor | Supported desktop consumer GPUs |
-| --- | --- | --- |
-| Turing | `>=8 GB` | `RTX 2060 12GB`, `RTX 2060 SUPER 8GB`, `RTX 2070 8GB`, `RTX 2070 SUPER 8GB`, `RTX 2080 8GB`, `RTX 2080 SUPER 8GB`, `RTX 2080 Ti 11GB` |
-| Ampere | `>=10 GB` | `RTX 3060 12GB`, `RTX 3080 10GB`, `RTX 3080 12GB`, `RTX 3080 Ti 12GB`, `RTX 3090 24GB`, `RTX 3090 Ti 24GB` |
-| Ada | `>=10 GB` | `RTX 4060 Ti 16GB`, `RTX 4070 12GB`, `RTX 4070 SUPER 12GB`, `RTX 4070 Ti 12GB`, `RTX 4070 Ti SUPER 16GB`, `RTX 4080 16GB`, `RTX 4080 SUPER 16GB`, `RTX 4090 24GB` |
-| Blackwell | `>=10 GB` | `RTX 5060 Ti 16GB`, `RTX 5070 12GB`, `RTX 5070 Ti 16GB`, `RTX 5080 16GB`, `RTX 5090 32GB` |
-- Desktop only: laptop GPUs are not officially supported due to wide power and thermal variance.
-- Floor policy: Turing desktop GPUs are supported at >=8 GB VRAM; Ampere/Ada/Blackwell desktop GPUs require >=10 GB VRAM.
-- `RTX 2060 6GB` remains out of matrix support due to VRAM floor.
-- Runtime path is intentionally unified across platforms: PyTorch SDPA attention + eager optimizer steps.
-- Runtime adaptation is profile-driven: compute capability, BF16/TF32 support, OS, and VRAM tier determine candidate batch sizes and checkpointing strategy.
-- Supported consumer profiles run a short eager-mode autotune pass and cache the selected candidate per GPU/runtime fingerprint.
-- Autotune env controls: `AUTORESEARCH_DISABLE_AUTOTUNE=1` skips probing; `AUTORESEARCH_AUTOTUNE_REFRESH=1` refreshes the cached decision.
-- Tested hardware in this repo remains RTX 3080 10 GB on Windows. Other listed SKUs are matrix-supported but may be less field-tested here.
-- Non-goals for this fork include FA3/H100-specialized paths, unofficial Triton-for-Windows stacks, AMD/ROCm, Apple Metal, and multi-GPU training.
-- Default dataset is `karpathy/tinystories_gpt4_clean` for consumer-GPU practicality.
+Open these two files in your editor:
 
-## License
+- [datasets/example-project/project_brief.md](./datasets/example-project/project_brief.md)
+- [datasets/example-project/research_context.json](./datasets/example-project/research_context.json)
 
-MIT
+For your real project, that usually means editing:
+
+```text
+datasets/<dataset-name>/project_brief.md
+datasets/<dataset-name>/research_context.json
+```
+
+For our example peach detecting project:
+
+```text
+datasets/peach-orchard-spring-2026/project_brief.md
+datasets/peach-orchard-spring-2026/research_context.json
+```
+
+`project_brief.md` should explain the real-world context, such as:
+
+- what you are detecting
+- where the imagery came from
+- what makes the task hard
+- whether misses or false positives are more costly
+
+For our example peach detecting project:
+
+```md
+# Project Brief
+
+## Detection Objective
+
+Detect peaches in high-resolution drone imagery of a commercial orchard.
+
+## Scene Context
+
+- Imagery source: drone orthomosaic
+- Viewpoint: top-down / near nadir
+- Target object: peaches
+- Common issues: leaf occlusion, clustered fruit, shadows, bright sunlit canopy
+
+## Validation Priorities
+
+1. improve validation mAP
+2. keep useful precision
+3. avoid missing partially occluded peaches
+```
+
+`research_context.json` should lock in:
+
+- the Optuna-selected model family/backbone
+- the fixed learning rate
+- the fixed batch size
+- the fixed epochs
+- the validation split
+- the baseline `chip_size`
+- the current best validation metrics, if known
+
+For our example peach detecting project:
+
+```json
+{
+  "project_name": "peach-orchard-spring-2026",
+  "framework": "arcgis.learn",
+  "project_brief_path": "project_brief.md",
+  "dataset": {
+    "train_export_path": "train_export",
+    "dataset_type": "PASCAL_VOC_rectangles"
+  },
+  "baseline_model": {
+    "architecture": "FasterRCNN",
+    "backbone": "resnet50",
+    "pretrained_path": null
+  },
+  "approved_models": {
+    "FasterRCNN": [
+      "resnet50"
+    ]
+  },
+  "fixed_parameters": {
+    "learning_rate": 0.001,
+    "batch_size": 4,
+    "epochs": 20,
+    "validation_split": 0.1
+  },
+  "baseline_pipeline": {
+    "chip_size": 320
+  },
+  "current_best_metrics": {
+    "map": 0.42,
+    "precision": 0.71,
+    "recall": 0.64
+  },
+  "allowed_change_areas": [
+    "augmentation",
+    "preprocessing",
+    "postprocessing",
+    "chip_size"
+  ],
+  "prohibited_actions": [
+    "Do not change learning_rate",
+    "Do not change batch_size",
+    "Do not change epochs",
+    "Do not access a test dataset",
+    "Do not modify labels or add external data"
+  ]
+}
+```
+
+### 6. Check your ArcGIS environment
+
+In **PowerShell** at the repo root, run:
+
+```powershell
+.\doctor.ps1
+```
+
+This confirms that ArcGIS Pro Python, `arcgis.learn`, and the required dependencies are available.
+
+### 7. Validate the project workspace
+
+Still in **PowerShell** at the repo root, run:
+
+```powershell
+.\prepare.ps1 --dataset <dataset-name>
+```
+
+For our example peach detecting project:
+
+```powershell
+.\prepare.ps1 --dataset peach-orchard-spring-2026
+```
+
+This validates the dataset folder, the locked context, and the active project selection.
+
+### 8. Dry-run the runner
+
+Still in **PowerShell** at the repo root, run:
+
+```powershell
+.\train.ps1 --dry-run
+```
+
+This checks that the runner can load your active project and proposal without starting a real training job.
+
+### 9. Run one experiment
+
+Still in **PowerShell** at the repo root, run:
+
+```powershell
+.\train.ps1
+```
+
+Optional infrastructure-only smoke test:
+
+```powershell
+.\train.ps1 --smoke-test
+```
+
+`--smoke-test` is only for checking the harness. It is not a research result.
+
+### 10. Hand the repo to your AI agent
+
+Once the setup works, start your coding agent in this repo and point it at [program.md](./program.md).
+
+Example starter prompt:
+
+```text
+Read program.md and the active dataset workspace, then start the next constrained research iteration.
+Generate 3-5 candidate pipeline changes, choose the strongest one, update proposal.py, run the experiment, and continue within the repo's fixed constraints.
+```
+
+For our example peach detecting project:
+
+```text
+Read program.md and the active peach-orchard-spring-2026 dataset workspace, then start the next constrained research iteration.
+Focus on improving peach detection in top-down orchard drone imagery. Generate 3-5 candidate pipeline changes, choose the strongest one, update proposal.py, run the experiment, and continue within the repo's fixed constraints.
+```
+
+## What The Agent Is Allowed To Change
+
+During normal research, the agent should edit only [proposal.py](./proposal.py).
+
+The runner enforces the important constraints in code.
+
+Fixed and normally immutable:
+
+- learning rate
+- batch size
+- epochs
+
+Allowed research levers:
+
+- augmentation policy
+- preprocessing resize strategy
+- post-processing thresholds used for validation scoring
+- `chip_size`
+
+Model and backbone selection should normally already be chosen before this repo, for example with Optuna. If you intentionally want to permit limited model switching, you can allow that in `approved_models`, but the default recommendation is to keep it narrow.
+
+Explicitly disallowed:
+
+- test dataset access
+- label edits
+- external data
+- arbitrary custom model code
+
+## What You Get Out
+
+Each run produces a reproducible research record:
+
+- one new row in [results.tsv](./results.tsv)
+- one run folder under `.autoresearch/runs/<run-id>/`
+- snapshots of the active context, proposal, and project brief
+- a machine-readable run summary
+
+The main metric is validation `mAP`. Precision and recall are also logged when they are available from the ArcGIS Learn model object.
+
+The intended outcome is not "fully automatic deployment." The intended outcome is a clean record of which constrained pipeline changes improved or harmed validation performance, so you can converge on a stronger ArcGIS Learn workflow for your dataset.
+
+## Current Scope
+
+This repo is deliberately not:
+
+- a replacement for Optuna
+- a broad hyperparameter tuning system
+- a generic PyTorch model-development workspace
+- a place to use the test set during iteration
+
+It is a narrow, reproducible harness for agent-driven pipeline research after the baseline model and fixed training recipe have already been chosen.

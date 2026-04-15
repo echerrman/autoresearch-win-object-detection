@@ -1,561 +1,461 @@
 """
-One-time data preparation for autoresearch experiments.
-Downloads data and trains a BPE tokenizer.
+Fixed preflight and dataset/context validation for ArcGIS Learn autoresearch.
 
-Usage:
-    python prepare.py
-
-Data and tokenizer are stored in the cache directory (overridable with
-AUTORESEARCH_CACHE_DIR). The active dataset can be pinned with
-AUTORESEARCH_DATASET or by running this script with --dataset.
+Run this file through ArcGIS Pro Python:
+    .\\prepare.ps1 --dataset <dataset-name>
 """
 
+from __future__ import annotations
+
 import argparse
-import math
+import datetime as dt
+import json
 import os
-import pickle
-import shutil
-import time
+import platform
+import sys
+import warnings
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 
-import pyarrow.parquet as pq
-import requests
-import rustbpe
-import tiktoken
-import torch
+REPO_ROOT = Path(__file__).resolve().parent
+DATASETS_DIR = REPO_ROOT / "datasets"
+STATE_DIR = REPO_ROOT / ".autoresearch"
+ACTIVE_PROJECT_PATH = STATE_DIR / "active_project.json"
+ENVIRONMENT_REPORT_PATH = STATE_DIR / "environment_report.json"
+RESULTS_PATH = REPO_ROOT / "results.tsv"
+RESULTS_HEADER = (
+    "run_id\ttimestamp\tproposal_title\tprimary_change\tarchitecture\tbackbone\tchip_size\t"
+    "val_map\tval_precision\tval_recall\ttraining_minutes\tstatus\tnotes"
+)
 
-# ---------------------------------------------------------------------------
-# Constants (fixed, do not modify)
-# ---------------------------------------------------------------------------
-
-MAX_SEQ_LEN = 2048          # context length
-TIME_BUDGET = 300           # training time budget in seconds (5 minutes)
-EVAL_TOKENS = 40 * 524288   # number of tokens for validation eval
-VOCAB_SIZE = 8192
-
-# BPE split pattern (GPT-4 style, with \p{N}{1,2} instead of {1,3})
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-
-SPECIAL_TOKENS = [f"<|reserved_{i}|>" for i in range(4)]
-BOS_TOKEN = "<|reserved_0|>"
-
-# ---------------------------------------------------------------------------
-# Dataset + cache configuration
-# ---------------------------------------------------------------------------
-
-DEFAULT_DATASET = "tinystories"
-DATASET_CHOICES = ("tinystories",)
-
-
-def _default_cache_dir():
-    env_cache = os.environ.get("AUTORESEARCH_CACHE_DIR")
-    if env_cache:
-        return os.path.expanduser(env_cache)
-
-    legacy_cache = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch")
-    if os.name != "nt":
-        return legacy_cache
-
-    if os.path.exists(legacy_cache):
-        return legacy_cache
-
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return os.path.join(local_app_data, "autoresearch")
-    return legacy_cache
-
-
-CACHE_DIR = _default_cache_dir()
-DATASETS_DIR = os.path.join(CACHE_DIR, "datasets")
-ACTIVE_DATASET_PATH = os.path.join(CACHE_DIR, "active_dataset.txt")
-
-DATASET_CONFIGS = {
-    "tinystories": {
-        "filename": "tinystories_gpt4_clean.parquet",
-        "url": "https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean/resolve/main/tinystories_gpt4_clean.parquet",
-        "splits": {
-            "test": (0, 10_000),
-            "val": (10_000, 20_000),
-            "train": (20_000, None),
-        },
-    },
+KNOWN_EXPORT_MARKERS = (
+    "images",
+    "labels",
+    "map.txt",
+    "stats.json",
+    "esri_accumulated_stats.json",
+    "esri_model_definition.emd",
+)
+SUPPORTED_CHANGE_AREAS = {
+    "augmentation",
+    "preprocessing",
+    "postprocessing",
+    "sampling",
+    "model_selection",
+    "chip_size",
+}
+SUPPORTED_ARCHITECTURES = {
+    "FasterRCNN",
+    "RetinaNet",
+    "MaskRCNN",
+    "RTDetrV2",
+    "YOLOv3",
 }
 
 
-def _normalize_dataset_name(dataset_name):
-    if dataset_name is None:
-        return None
-    value = dataset_name.strip().lower()
-    if value not in DATASET_CHOICES:
-        raise ValueError(f"Unknown dataset '{dataset_name}'. Expected one of {DATASET_CHOICES}.")
-    return value
+@dataclass
+class EnvironmentReport:
+    python_executable: str
+    python_version: str
+    platform: str
+    propy_path: str | None
+    arcgis_available: bool
+    arcgis_version: str | None
+    arcgis_learn_available: bool
+    arcpy_available: bool
+    arcgis_pro_version: str | None
+    image_analyst_status: str | None
+    torch_version: str | None
+    torchvision_version: str | None
+    gpu_available: bool | None
+    gpu_name: str | None
 
 
-def _load_active_dataset_from_file():
-    if not os.path.exists(ACTIVE_DATASET_PATH):
-        return None
-    with open(ACTIVE_DATASET_PATH, "r", encoding="utf-8") as f:
-        value = f.read().strip().lower()
-    if value in DATASET_CHOICES:
-        return value
+def utc_now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def ensure_state_dir() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def detect_propy_path() -> Path | None:
+    candidates = [
+        Path("C:/Program Files/ArcGIS/Pro/bin/Python/Scripts/propy.bat"),
+        Path.home() / "AppData/Local/Programs/ArcGIS/Pro/bin/Python/Scripts/propy.bat",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
     return None
 
 
-def _resolve_dataset_name(dataset_name=None):
-    normalized = _normalize_dataset_name(dataset_name)
-    if normalized is not None:
-        return normalized
+def inspect_environment() -> EnvironmentReport:
+    propy_path = detect_propy_path()
+    arcgis_available = False
+    arcgis_version = None
+    arcgis_learn_available = False
+    arcpy_available = False
+    arcgis_pro_version = None
+    image_analyst_status = None
+    torch_version = None
+    torchvision_version = None
+    gpu_available = None
+    gpu_name = None
 
-    env_value = os.environ.get("AUTORESEARCH_DATASET")
     try:
-        env_dataset = _normalize_dataset_name(env_value)
-    except ValueError:
-        print(
-            f"Warning: ignoring unsupported AUTORESEARCH_DATASET={env_value!r}; "
-            f"using '{DEFAULT_DATASET}'."
-        )
-        env_dataset = None
-    if env_dataset is not None:
-        return env_dataset
+        warnings.filterwarnings("ignore", category=SyntaxWarning)
+        import arcgis  # type: ignore
 
-    file_dataset = _load_active_dataset_from_file()
-    if file_dataset is not None:
-        return file_dataset
-
-    return DEFAULT_DATASET
-
-
-def _set_active_dataset(dataset_name):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(ACTIVE_DATASET_PATH, "w", encoding="utf-8") as f:
-        f.write(dataset_name + "\n")
-
-
-def _dataset_root(dataset_name=None):
-    dataset = _resolve_dataset_name(dataset_name)
-    return os.path.join(DATASETS_DIR, dataset)
-
-
-def _data_dir(dataset_name=None):
-    return os.path.join(_dataset_root(dataset_name), "data")
-
-
-def _tokenizer_dir(dataset_name=None):
-    return os.path.join(_dataset_root(dataset_name), "tokenizer")
-
-
-def _tiny_parquet_path(dataset_name=None):
-    dataset = _resolve_dataset_name(dataset_name)
-    config = DATASET_CONFIGS[dataset]
-    return os.path.join(_data_dir(dataset), config["filename"])
-
-
-def _tiny_legacy_parquet_paths(dataset_name=None):
-    dataset = _resolve_dataset_name(dataset_name)
-    data_dir = _data_dir(dataset)
-    legacy_flat_data_dir = os.path.join(CACHE_DIR, "data")
-    return (
-        os.path.join(data_dir, "tinystories_gpt4-clean.parquet"),
-        os.path.join(legacy_flat_data_dir, "tinystories_gpt4_clean.parquet"),
-        os.path.join(legacy_flat_data_dir, "tinystories_gpt4-clean.parquet"),
-    )
-
-
-def _resolve_tiny_parquet_for_read(dataset_name=None):
-    dataset = _resolve_dataset_name(dataset_name)
-    data_dir = _data_dir(dataset)
-    current_path = _tiny_parquet_path(dataset)
-    if os.path.exists(current_path):
-        return current_path
-
-    for legacy_path in _tiny_legacy_parquet_paths(dataset):
-        if not os.path.exists(legacy_path):
-            continue
-        os.makedirs(data_dir, exist_ok=True)
+        arcgis_available = True
+        arcgis_version = getattr(arcgis, "__version__", None)
         try:
-            os.replace(legacy_path, current_path)
-            print(f"Data: migrated legacy TinyStories parquet to {current_path}")
-            return current_path
-        except OSError:
-            try:
-                shutil.copy2(legacy_path, current_path)
-                print(f"Data: copied legacy TinyStories parquet to {current_path}")
-                return current_path
-            except OSError:
-                return legacy_path
-    return current_path
+            import arcgis.learn  # type: ignore  # noqa: F401
+
+            arcgis_learn_available = True
+        except Exception:
+            arcgis_learn_available = False
+    except Exception:
+        arcgis_available = False
+
+    try:
+        import arcpy  # type: ignore
+
+        arcpy_available = True
+        try:
+            arcgis_pro_version = arcpy.GetInstallInfo().get("Version")
+        except Exception:
+            arcgis_pro_version = None
+        try:
+            image_analyst_status = arcpy.CheckExtension("ImageAnalyst")
+        except Exception:
+            image_analyst_status = None
+    except Exception:
+        arcpy_available = False
+
+    try:
+        import torch  # type: ignore
+
+        torch_version = getattr(torch, "__version__", None)
+        gpu_available = bool(torch.cuda.is_available())
+        if gpu_available:
+            gpu_name = torch.cuda.get_device_name(0)
+        try:
+            import torchvision  # type: ignore
+
+            torchvision_version = getattr(torchvision, "__version__", None)
+        except Exception:
+            torchvision_version = None
+    except Exception:
+        torch_version = None
+
+    return EnvironmentReport(
+        python_executable=sys.executable,
+        python_version=sys.version.split()[0],
+        platform=platform.platform(),
+        propy_path=str(propy_path) if propy_path else None,
+        arcgis_available=arcgis_available,
+        arcgis_version=arcgis_version,
+        arcgis_learn_available=arcgis_learn_available,
+        arcpy_available=arcpy_available,
+        arcgis_pro_version=arcgis_pro_version,
+        image_analyst_status=image_analyst_status,
+        torch_version=torch_version,
+        torchvision_version=torchvision_version,
+        gpu_available=gpu_available,
+        gpu_name=gpu_name,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Data download (TinyStories only)
-# ---------------------------------------------------------------------------
+def write_environment_report(report: EnvironmentReport) -> None:
+    ensure_state_dir()
+    ENVIRONMENT_REPORT_PATH.write_text(json.dumps(asdict(report), indent=2), encoding="utf-8")
 
 
-def _download_tinystories_file(dataset_name):
-    config = DATASET_CONFIGS[dataset_name]
-    data_dir = _data_dir(dataset_name)
-    os.makedirs(data_dir, exist_ok=True)
-
-    filename = config["filename"]
-    filepath = os.path.join(data_dir, filename)
-    resolved_existing_path = _resolve_tiny_parquet_for_read(dataset_name)
-    if os.path.exists(resolved_existing_path):
-        print(f"Data: {filename} already downloaded at {resolved_existing_path}")
-        return
-
-    url = config["url"]
-    print(f"Data: downloading {filename}...")
-    response = requests.get(url, stream=True, timeout=60)
-    response.raise_for_status()
-    temp_path = filepath + ".tmp"
-    with open(temp_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
-    os.rename(temp_path, filepath)
-    print(f"Data: downloaded {filename} to {filepath}")
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
 
 
-def download_data(dataset_name):
-    dataset = _resolve_dataset_name(dataset_name)
-    _download_tinystories_file(dataset)
+def resolve_dataset_dir(dataset: str) -> Path:
+    candidate = Path(dataset)
+    if not candidate.is_absolute():
+        candidate = DATASETS_DIR / candidate
+    candidate = candidate.resolve()
+    if not candidate.exists():
+        raise ValueError(f"Dataset workspace does not exist: {candidate}")
+    if not candidate.is_dir():
+        raise ValueError(f"Dataset workspace must be a directory: {candidate}")
+    return candidate
 
 
-# ---------------------------------------------------------------------------
-# Tokenizer training
-# ---------------------------------------------------------------------------
+def resolve_path(base_dir: Path, raw_path: str) -> Path:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
 
-def list_parquet_files(dataset_name=None):
-    dataset = _resolve_dataset_name(dataset_name)
-    data_dir = _data_dir(dataset)
-    files = []
-    if os.path.exists(data_dir):
-        files = sorted(
-            name for name in os.listdir(data_dir)
-            if name.endswith(".parquet") and not name.endswith(".tmp")
+
+def reject_test_references(value: Any, parent_key: str = "context") -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if "test" in key.lower():
+                raise ValueError(
+                    "Test dataset references are not allowed in research_context.json. "
+                    f"Remove the key '{parent_key}.{key}'."
+                )
+            reject_test_references(nested, f"{parent_key}.{key}")
+    elif isinstance(value, list):
+        for idx, nested in enumerate(value):
+            reject_test_references(nested, f"{parent_key}[{idx}]")
+
+
+def validate_export_workspace(train_export_path: Path) -> list[str]:
+    if not train_export_path.exists():
+        raise ValueError(f"Exported training workspace is missing: {train_export_path}")
+    if not train_export_path.is_dir():
+        raise ValueError(f"Exported training workspace must be a directory: {train_export_path}")
+
+    markers = [name for name in KNOWN_EXPORT_MARKERS if (train_export_path / name).exists()]
+    if not markers:
+        visible = sorted(item.name for item in train_export_path.iterdir())
+        preview = ", ".join(visible[:10]) if visible else "<empty>"
+        raise ValueError(
+            "The exported training workspace does not look like an ArcGIS export. "
+            f"Expected one of {KNOWN_EXPORT_MARKERS}, found: {preview}"
         )
-    if files:
-        return [os.path.join(data_dir, name) for name in files]
-    if dataset == "tinystories":
-        tiny_path = _resolve_tiny_parquet_for_read(dataset)
-        if os.path.exists(tiny_path):
-            return [tiny_path]
-    return []
+    return markers
 
 
-def _iter_tinystories_texts(split, dataset_name=None):
-    dataset = _resolve_dataset_name(dataset_name)
-    config = DATASET_CONFIGS[dataset]
-    start_idx, end_idx = config["splits"][split]
-    tiny_path = _resolve_tiny_parquet_for_read(dataset)
+def normalize_context(context: dict[str, Any], dataset_dir: Path, context_path: Path) -> dict[str, Any]:
+    reject_test_references(context)
 
-    if not os.path.exists(tiny_path):
-        raise FileNotFoundError(
-            f"TinyStories parquet not found at {tiny_path}. Run prepare.py first."
+    framework = context.get("framework")
+    if framework != "arcgis.learn":
+        raise ValueError("research_context.json must set framework to 'arcgis.learn'.")
+
+    brief_path_raw = context.get("project_brief_path")
+    if not isinstance(brief_path_raw, str) or not brief_path_raw.strip():
+        raise ValueError("research_context.json must define project_brief_path.")
+    project_brief_path = resolve_path(dataset_dir, brief_path_raw)
+    if not project_brief_path.exists():
+        raise ValueError(f"Project brief does not exist: {project_brief_path}")
+
+    dataset_section = context.get("dataset")
+    if not isinstance(dataset_section, dict):
+        raise ValueError("research_context.json must define a dataset object.")
+    export_path_raw = dataset_section.get("train_export_path")
+    if not isinstance(export_path_raw, str) or not export_path_raw.strip():
+        raise ValueError("dataset.train_export_path must be defined.")
+    train_export_path = resolve_path(dataset_dir, export_path_raw)
+    markers = validate_export_workspace(train_export_path)
+
+    baseline_model = context.get("baseline_model")
+    if not isinstance(baseline_model, dict):
+        raise ValueError("research_context.json must define baseline_model.")
+    architecture = baseline_model.get("architecture")
+    backbone = baseline_model.get("backbone")
+    if architecture not in SUPPORTED_ARCHITECTURES:
+        raise ValueError(
+            f"baseline_model.architecture must be one of {sorted(SUPPORTED_ARCHITECTURES)}."
+        )
+    if backbone is not None and not isinstance(backbone, str):
+        raise ValueError("baseline_model.backbone must be a string or null.")
+
+    approved_models = context.get("approved_models")
+    if not isinstance(approved_models, dict) or not approved_models:
+        raise ValueError("research_context.json must define approved_models.")
+    for model_name, backbones in approved_models.items():
+        if model_name not in SUPPORTED_ARCHITECTURES:
+            raise ValueError(
+                f"approved_models contains unsupported architecture '{model_name}'."
+            )
+        if backbones is not None and not isinstance(backbones, list):
+            raise ValueError(
+                f"approved_models.{model_name} must be a list of backbones or null."
+            )
+        if isinstance(backbones, list) and not all(isinstance(item, str) for item in backbones):
+            raise ValueError(
+                f"approved_models.{model_name} must contain only backbone strings."
+            )
+
+    approved_backbones = approved_models.get(architecture)
+    if isinstance(approved_backbones, list) and backbone not in approved_backbones:
+        raise ValueError(
+            f"baseline backbone '{backbone}' is not allowed for architecture '{architecture}'."
         )
 
-    current_idx = 0
-    parquet_file = pq.ParquetFile(tiny_path)
-    for row_group_idx in range(parquet_file.num_row_groups):
-        row_group = parquet_file.read_row_group(row_group_idx, columns=["text"])
-        texts = row_group.column("text").to_pylist()
-        for text in texts:
-            if current_idx < start_idx:
-                current_idx += 1
-                continue
-            if end_idx is not None and current_idx >= end_idx:
-                return
-            yield text
-            current_idx += 1
+    fixed_parameters = context.get("fixed_parameters")
+    if not isinstance(fixed_parameters, dict):
+        raise ValueError("research_context.json must define fixed_parameters.")
+    for required_key in ("learning_rate", "batch_size", "epochs", "validation_split"):
+        if required_key not in fixed_parameters:
+            raise ValueError(f"fixed_parameters.{required_key} must be defined.")
+    if fixed_parameters["learning_rate"] is None:
+        raise ValueError("fixed_parameters.learning_rate must not be null.")
+    if not isinstance(fixed_parameters["batch_size"], int) or fixed_parameters["batch_size"] <= 0:
+        raise ValueError("fixed_parameters.batch_size must be a positive integer.")
+    if not isinstance(fixed_parameters["epochs"], int) or fixed_parameters["epochs"] <= 0:
+        raise ValueError("fixed_parameters.epochs must be a positive integer.")
+    validation_split = fixed_parameters["validation_split"]
+    if not isinstance(validation_split, (int, float)) or not (0.0 < float(validation_split) < 1.0):
+        raise ValueError("fixed_parameters.validation_split must be between 0 and 1.")
+
+    baseline_pipeline = context.get("baseline_pipeline")
+    if not isinstance(baseline_pipeline, dict):
+        raise ValueError("research_context.json must define baseline_pipeline.")
+    chip_size = baseline_pipeline.get("chip_size")
+    if not isinstance(chip_size, int) or chip_size <= 0:
+        raise ValueError("baseline_pipeline.chip_size must be a positive integer.")
+
+    current_best = context.get("current_best_metrics")
+    if not isinstance(current_best, dict):
+        raise ValueError("research_context.json must define current_best_metrics.")
+    for key in ("map", "precision", "recall"):
+        if key not in current_best:
+            raise ValueError(f"current_best_metrics.{key} must be defined.")
+
+    allowed_change_areas = context.get("allowed_change_areas")
+    if not isinstance(allowed_change_areas, list) or not allowed_change_areas:
+        raise ValueError("research_context.json must define allowed_change_areas.")
+    invalid_areas = [area for area in allowed_change_areas if area not in SUPPORTED_CHANGE_AREAS]
+    if invalid_areas:
+        raise ValueError(
+            f"allowed_change_areas contains unsupported values: {invalid_areas}."
+        )
+    if "chip_size" not in allowed_change_areas:
+        raise ValueError("allowed_change_areas must include 'chip_size'.")
+
+    prohibited_actions = context.get("prohibited_actions")
+    if not isinstance(prohibited_actions, list) or not prohibited_actions:
+        raise ValueError("research_context.json must define prohibited_actions.")
+
+    normalized = json.loads(json.dumps(context))
+    normalized["project_brief_path"] = str(project_brief_path)
+    normalized["dataset"]["train_export_path"] = str(train_export_path)
+    normalized["dataset_dir"] = str(dataset_dir)
+    normalized["research_context_path"] = str(context_path.resolve())
+    normalized["export_markers"] = markers
+    return normalized
 
 
-def text_iterator(dataset_name=None, max_chars=1_000_000_000, doc_cap=10_000):
-    dataset = _resolve_dataset_name(dataset_name)
-    chars = 0
-
-    text_iter = _iter_tinystories_texts("train", dataset_name=dataset)
-    for text in text_iter:
-        doc = text[:doc_cap] if len(text) > doc_cap else text
-        chars += len(doc)
-        yield doc
-        if chars >= max_chars:
-            return
+def load_and_validate_context(dataset_dir: Path) -> dict[str, Any]:
+    context_path = dataset_dir / "research_context.json"
+    if not context_path.exists():
+        raise ValueError(f"Missing research_context.json in {dataset_dir}")
+    context = load_json(context_path)
+    return normalize_context(context, dataset_dir, context_path)
 
 
-def train_tokenizer(dataset_name=None):
-    dataset = _resolve_dataset_name(dataset_name)
-    tokenizer_dir = _tokenizer_dir(dataset)
-    tokenizer_pkl = os.path.join(tokenizer_dir, "tokenizer.pkl")
-    token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
-
-    if os.path.exists(tokenizer_pkl) and os.path.exists(token_bytes_path):
-        print(f"Tokenizer: already trained at {tokenizer_dir}")
+def ensure_results_file() -> None:
+    if not RESULTS_PATH.exists():
+        RESULTS_PATH.write_text(RESULTS_HEADER + "\n", encoding="utf-8")
         return
-
-    os.makedirs(tokenizer_dir, exist_ok=True)
-
-    parquet_files = list_parquet_files(dataset)
-    if len(parquet_files) < 1:
-        print("Tokenizer: TinyStories parquet is missing. Run prepare.py first.")
-        raise RuntimeError("TinyStories parquet is missing.")
-
-    print(f"Tokenizer: training BPE tokenizer ({dataset})...")
-    t0 = time.time()
-    tokenizer = rustbpe.Tokenizer()
-    vocab_size_no_special = VOCAB_SIZE - len(SPECIAL_TOKENS)
-    tokenizer.train_from_iterator(
-        text_iterator(dataset_name=dataset),
-        vocab_size_no_special,
-        pattern=SPLIT_PATTERN,
-    )
-
-    pattern = tokenizer.get_pattern()
-    mergeable_ranks = {bytes(k): v for k, v in tokenizer.get_mergeable_ranks()}
-    token_offset = len(mergeable_ranks)
-    special_tokens = {name: token_offset + i for i, name in enumerate(SPECIAL_TOKENS)}
-    enc = tiktoken.Encoding(
-        name="rustbpe",
-        pat_str=pattern,
-        mergeable_ranks=mergeable_ranks,
-        special_tokens=special_tokens,
-    )
-
-    with open(tokenizer_pkl, "wb") as f:
-        pickle.dump(enc, f)
-
-    t1 = time.time()
-    print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_pkl}")
-
-    print("Tokenizer: building token_bytes lookup...")
-    special_set = set(SPECIAL_TOKENS)
-    token_bytes_list = []
-    for token_id in range(enc.n_vocab):
-        token_str = enc.decode([token_id])
-        if token_str in special_set:
-            token_bytes_list.append(0)
-        else:
-            token_bytes_list.append(len(token_str.encode("utf-8")))
-    token_bytes_tensor = torch.tensor(token_bytes_list, dtype=torch.int32)
-    torch.save(token_bytes_tensor, token_bytes_path)
-    print(f"Tokenizer: saved token_bytes to {token_bytes_path}")
-
-    with open(os.path.join(tokenizer_dir, "dataset.txt"), "w", encoding="utf-8") as f:
-        f.write(dataset + "\n")
-
-    test = "Hello world! Numbers: 123. Unicode: 你好"
-    encoded = enc.encode_ordinary(test)
-    decoded = enc.decode(encoded)
-    assert decoded == test, f"Tokenizer roundtrip failed: {test!r} -> {decoded!r}"
-    print(f"Tokenizer: sanity check passed (vocab_size={enc.n_vocab})")
+    current = RESULTS_PATH.read_text(encoding="utf-8").splitlines()
+    if not current:
+        RESULTS_PATH.write_text(RESULTS_HEADER + "\n", encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
-# Runtime utilities (imported by train.py)
-# ---------------------------------------------------------------------------
-
-class Tokenizer:
-    """Minimal tokenizer wrapper. Training is handled above."""
-
-    def __init__(self, enc, dataset):
-        self.enc = enc
-        self.dataset = _resolve_dataset_name(dataset)
-        self.bos_token_id = enc.encode_single_token(BOS_TOKEN)
-
-    @classmethod
-    def from_directory(cls, tokenizer_dir=None, dataset=None):
-        dataset_name = _resolve_dataset_name(dataset)
-        resolved_dir = tokenizer_dir if tokenizer_dir is not None else _tokenizer_dir(dataset_name)
-        with open(os.path.join(resolved_dir, "tokenizer.pkl"), "rb") as f:
-            enc = pickle.load(f)
-        return cls(enc, dataset=dataset_name)
-
-    def get_vocab_size(self):
-        return self.enc.n_vocab
-
-    def get_bos_token_id(self):
-        return self.bos_token_id
-
-    def encode(self, text, prepend=None, num_threads=8):
-        if prepend is not None:
-            prepend_id = prepend if isinstance(prepend, int) else self.enc.encode_single_token(prepend)
-        if isinstance(text, str):
-            ids = self.enc.encode_ordinary(text)
-            if prepend is not None:
-                ids.insert(0, prepend_id)
-        elif isinstance(text, list):
-            ids = self.enc.encode_ordinary_batch(text, num_threads=num_threads)
-            if prepend is not None:
-                for row in ids:
-                    row.insert(0, prepend_id)
-        else:
-            raise ValueError(f"Invalid input type: {type(text)}")
-        return ids
-
-    def decode(self, ids):
-        return self.enc.decode(ids)
+def write_active_project(context: dict[str, Any]) -> dict[str, Any]:
+    ensure_state_dir()
+    manifest = {
+        "dataset_name": Path(context["dataset_dir"]).name,
+        "dataset_dir": context["dataset_dir"],
+        "train_export_path": context["dataset"]["train_export_path"],
+        "project_brief_path": context["project_brief_path"],
+        "research_context_path": context["research_context_path"],
+        "framework": context["framework"],
+        "prepared_at": utc_now_iso(),
+    }
+    ACTIVE_PROJECT_PATH.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
 
 
-def get_token_bytes(device="cpu", dataset=None):
-    dataset_name = _resolve_dataset_name(dataset)
-    path = os.path.join(_tokenizer_dir(dataset_name), "token_bytes.pt")
-    with open(path, "rb") as f:
-        return torch.load(f, map_location=device)
+def load_active_project() -> dict[str, Any]:
+    if not ACTIVE_PROJECT_PATH.exists():
+        raise ValueError(
+            "No active project is configured. Run prepare.py or .\\prepare.ps1 first."
+        )
+    return load_json(ACTIVE_PROJECT_PATH)
 
 
-def _document_batches(split, dataset=None, tokenizer_batch_size=128):
-    dataset_name = _resolve_dataset_name(dataset)
-    assert split in ("train", "val", "test")
-
-    epoch = 1
-    while True:
-        batch = []
-        for text in _iter_tinystories_texts(split, dataset_name=dataset_name):
-            batch.append(text)
-            if len(batch) >= tokenizer_batch_size:
-                yield batch, epoch
-                batch = []
-        if batch:
-            yield batch, epoch
-        epoch += 1
+def run_doctor() -> EnvironmentReport:
+    report = inspect_environment()
+    write_environment_report(report)
+    return report
 
 
-def make_dataloader(tokenizer, B, T, split, device="cuda", dataset=None, buffer_size=1000):
-    """
-    BOS-aligned dataloader with best-fit packing.
-    Every row starts with BOS. Documents packed using best-fit to minimize cropping.
-    When no document fits remaining space, crops shortest doc to fill exactly.
-    100% utilization (no padding).
-    """
-    dataset_name = _resolve_dataset_name(dataset or getattr(tokenizer, "dataset", None))
-    if split == "test":
-        assert dataset_name == "tinystories", "Test split exists only for TinyStories."
-    assert split in ("train", "val", "test")
-
-    row_capacity = T + 1
-    batches = _document_batches(split, dataset=dataset_name)
-    bos_token = tokenizer.get_bos_token_id()
-    doc_buffer = []
-    epoch = 1
-    resolved_device = torch.device(device)
-    use_cuda = resolved_device.type == "cuda"
-
-    def refill_buffer():
-        nonlocal epoch
-        doc_batch, epoch = next(batches)
-        token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
-        doc_buffer.extend(token_lists)
-
-    row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda)
-    cpu_inputs = cpu_buffer[:B * T].view(B, T)
-    cpu_targets = cpu_buffer[B * T:].view(B, T)
-
-    if use_cuda:
-        gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=resolved_device)
-        inputs = gpu_buffer[:B * T].view(B, T)
-        targets = gpu_buffer[B * T:].view(B, T)
-    else:
-        gpu_buffer = None
-        inputs = cpu_inputs
-        targets = cpu_targets
-
-    while True:
-        for row_idx in range(B):
-            pos = 0
-            while pos < row_capacity:
-                while len(doc_buffer) < buffer_size:
-                    refill_buffer()
-
-                remaining = row_capacity - pos
-
-                best_idx = -1
-                best_len = 0
-                for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
-                    if doc_len <= remaining and doc_len > best_len:
-                        best_idx = i
-                        best_len = doc_len
-
-                if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
-                    row_buffer[row_idx, pos:pos + len(doc)] = torch.as_tensor(doc, dtype=torch.long)
-                    pos += len(doc)
-                else:
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-                    doc = doc_buffer.pop(shortest_idx)
-                    row_buffer[row_idx, pos:pos + remaining] = torch.as_tensor(doc[:remaining], dtype=torch.long)
-                    pos += remaining
-
-        cpu_inputs.copy_(row_buffer[:, :-1])
-        cpu_targets.copy_(row_buffer[:, 1:])
-        if use_cuda:
-            gpu_buffer.copy_(cpu_buffer, non_blocking=True)
-        yield inputs, targets, epoch
+def format_environment_report(report: EnvironmentReport) -> str:
+    lines = [
+        f"Python executable: {report.python_executable}",
+        f"Python version:    {report.python_version}",
+        f"Platform:          {report.platform}",
+        f"propy.bat:         {report.propy_path or 'not found'}",
+        f"ArcGIS available:  {report.arcgis_available}",
+        f"arcgis.learn:      {report.arcgis_learn_available}",
+        f"arcpy available:   {report.arcpy_available}",
+        f"ArcGIS Pro:        {report.arcgis_pro_version or 'unknown'}",
+        f"Image Analyst:     {report.image_analyst_status or 'unknown'}",
+        f"torch:             {report.torch_version or 'not found'}",
+        f"torchvision:       {report.torchvision_version or 'not found'}",
+        f"GPU available:     {report.gpu_available}",
+        f"GPU name:          {report.gpu_name or 'n/a'}",
+        f"Env report:        {ENVIRONMENT_REPORT_PATH}",
+    ]
+    return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Evaluation (DO NOT CHANGE METRIC DEFINITION)
-# ---------------------------------------------------------------------------
-
-@torch.no_grad()
-def evaluate_bpb(model, tokenizer, batch_size, device="cuda", dataset=None, eval_tokens=EVAL_TOKENS):
-    """
-    Bits per byte (BPB): vocab size-independent evaluation metric.
-    Sums per-token cross-entropy (in nats), sums target byte lengths,
-    then converts nats/byte to bits/byte. Special tokens (byte length 0)
-    are excluded from both sums.
-    """
-    dataset_name = _resolve_dataset_name(dataset or getattr(tokenizer, "dataset", None))
-    token_bytes = get_token_bytes(device=device, dataset=dataset_name)
-    val_loader = make_dataloader(
-        tokenizer,
-        batch_size,
-        MAX_SEQ_LEN,
-        "val",
-        device=device,
-        dataset=dataset_name,
-    )
-    steps = max(1, eval_tokens // (batch_size * MAX_SEQ_LEN))
-    total_nats = 0.0
-    total_bytes = 0
-    for _ in range(steps):
-        x, y, _ = next(val_loader)
-        loss_flat = model(x, y, reduction="none").view(-1)
-        y_flat = y.view(-1)
-        nbytes = token_bytes[y_flat]
-        mask = nbytes > 0
-        total_nats += (loss_flat * mask).sum().item()
-        total_bytes += nbytes.sum().item()
-    if total_bytes == 0:
-        raise RuntimeError("Evaluation produced zero target bytes; cannot compute BPB.")
-    return total_nats / (math.log(2) * total_bytes)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare data and tokenizer for autoresearch")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Prepare ArcGIS Learn autoresearch project")
+    parser.add_argument("--dataset", help="Dataset workspace name under datasets/ or an absolute path.")
     parser.add_argument(
-        "--dataset",
-        choices=DATASET_CHOICES,
-        default=None,
-        help=(
-            "Dataset profile to prepare. If omitted, resolves in order: "
-            "AUTORESEARCH_DATASET, active_dataset.txt, then default tinystories."
-        ),
+        "--doctor",
+        action="store_true",
+        help="Only inspect the ArcGIS environment and write the environment report.",
     )
     args = parser.parse_args()
 
-    dataset_name = _resolve_dataset_name(args.dataset)
+    try:
+        report = run_doctor()
+        print(format_environment_report(report))
+        if args.doctor and not args.dataset:
+            return 0
 
-    print(f"Cache directory: {CACHE_DIR}")
-    print(f"Dataset: {dataset_name}")
-    print()
+        if not report.arcgis_learn_available:
+            raise ValueError(
+                "arcgis.learn is not available in the current Python runtime. "
+                "Use .\\prepare.ps1 or ArcGIS Pro's propy.bat."
+            )
+        if report.image_analyst_status not in (None, "Available"):
+            raise ValueError(
+                f"Image Analyst is not available: {report.image_analyst_status}"
+            )
+        if not args.dataset:
+            raise ValueError("--dataset is required unless --doctor is used by itself.")
 
-    download_data(dataset_name)
-    print()
-    train_tokenizer(dataset_name)
-    _set_active_dataset(dataset_name)
-    print()
-    print(f"Done! Ready to train. Active dataset is now '{dataset_name}'.")
+        dataset_dir = resolve_dataset_dir(args.dataset)
+        context = load_and_validate_context(dataset_dir)
+        manifest = write_active_project(context)
+        ensure_results_file()
+
+        print()
+        print(f"Dataset workspace: {dataset_dir}")
+        print(f"Project brief:     {context['project_brief_path']}")
+        print(f"Train export:      {context['dataset']['train_export_path']}")
+        print(f"Active project:    {ACTIVE_PROJECT_PATH}")
+        print(f"Results log:       {RESULTS_PATH}")
+        print(f"Prepared at:       {manifest['prepared_at']}")
+        return 0
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)

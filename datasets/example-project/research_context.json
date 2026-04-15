@@ -1,0 +1,67 @@
+{
+  "project_name": "peach-orchard-example",
+  "framework": "arcgis.learn",
+  "baseline_selection": {
+    "method": "Optuna",
+    "notes": "Use Optuna outside this repo to choose the baseline model and fixed training parameters before starting agent-driven pipeline iteration."
+  },
+  "project_brief_path": "project_brief.md",
+  "dataset": {
+    "train_export_path": "train_export",
+    "dataset_type": "PASCAL_VOC_rectangles"
+  },
+  "baseline_model": {
+    "architecture": "FasterRCNN",
+    "backbone": "resnet50",
+    "pretrained_path": null
+  },
+  "approved_models": {
+    "FasterRCNN": [
+      "resnet50",
+      "resnet101"
+    ]
+  },
+  "fixed_parameters": {
+    "learning_rate": 0.001,
+    "batch_size": 4,
+    "epochs": 20,
+    "validation_split": 0.1,
+    "fit": {
+      "one_cycle": true,
+      "early_stopping": false,
+      "checkpoint": true,
+      "tensorboard": false,
+      "mixed_precision": false,
+      "monitor": "average_precision"
+    },
+    "prepare_data": {
+      "dataset_type": "PASCAL_VOC_rectangles"
+    }
+  },
+  "baseline_pipeline": {
+    "chip_size": 320,
+    "resize_to": null,
+    "detect_thresh": 0.2,
+    "iou_thresh": 0.1
+  },
+  "current_best_metrics": {
+    "map": 0.0,
+    "precision": null,
+    "recall": null
+  },
+  "allowed_change_areas": [
+    "augmentation",
+    "preprocessing",
+    "postprocessing",
+    "sampling",
+    "model_selection",
+    "chip_size"
+  ],
+  "prohibited_actions": [
+    "Do not change learning_rate",
+    "Do not change batch_size",
+    "Do not change epochs",
+    "Do not access a test dataset",
+    "Do not modify labels or add external data"
+  ]
+}
