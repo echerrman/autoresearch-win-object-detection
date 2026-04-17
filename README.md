@@ -42,7 +42,7 @@ Before you start using this repo, Optuna should ideally already have decided:
 - the batch size
 - the epoch count
 - the starting chip size
-- optionally the validation split if you do not want to use the repo default
+- optionally the validation split if you do not want to use the repo default of 10%
 
 ## Supported Model Values
 
@@ -77,7 +77,7 @@ The validator is a little user-friendly here:
 - `resnet50`, `ResNet50`, and `resnet-50` will all normalize to `resnet50`
 - the architecture still needs to be one of the repo-supported ArcGIS model names above
 
-## What The User Actually Edits
+## Getting Started
 
 For normal setup, the user only needs to touch:
 
@@ -85,11 +85,9 @@ For normal setup, the user only needs to touch:
 - [dataset/project_config.json](./dataset/project_config.json)
 - [dataset/train_export/](./dataset/train_export/)
 
-Everything else is meant to stay stable unless you are developing the repo itself.
-
 `project_brief.md` is a plain-English note for the AI agent. It is helpful, but you do not need to rewrite all of it.
 
-`project_config.json` is the only JSON file the user needs to edit, and it is intentionally small. It is for the fixed baseline choices only.
+`project_config.json` is the only JSON file the user needs to edit.
 
 ## Project Layout
 
@@ -109,9 +107,11 @@ dataset/
   train_export/
 ```
 
-Run artifacts are written to `.autoresearch/` and ignored by git.
+Run artifacts are written to `.autoresearch/`.
 
 ## Quick Start
+
+I will use an example use case of detecting Peaches to help explain the steps.
 
 ### 1. Choose the baseline outside this repo
 
@@ -164,15 +164,6 @@ dataset/
   train_export/
 ```
 
-For our example peach detecting project, that same folder is where you would put the peach project details:
-
-```text
-dataset/
-  project_brief.md
-  project_config.json
-  train_export/
-```
-
 ### 4. Copy your ArcGIS export into `dataset/train_export/`
 
 In **ArcGIS Pro**, run `Export Training Data For Deep Learning` as you normally would.
@@ -198,7 +189,7 @@ dataset/train_export/
   images/
   labels/
   map.txt
-  stats.json
+  stats.txt
 ```
 
 ### 5. Fill in `project_brief.md` and `project_config.json`
@@ -232,24 +223,6 @@ The default template is intentionally short:
 ```json
 {
   "project_name": "peach-orchard-example",
-  "model": {
-    "architecture": "FasterRCNN",
-    "backbone": "resnet50"
-  },
-  "fixed_parameters": {
-    "learning_rate": 0.001,
-    "batch_size": 4,
-    "epochs": 20
-  },
-  "chip_size": 320
-}
-```
-
-For our example peach detecting project, you might set:
-
-```json
-{
-  "project_name": "peach-orchard-spring-2026",
   "model": {
     "architecture": "FasterRCNN",
     "backbone": "resnet50"
