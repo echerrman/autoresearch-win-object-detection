@@ -2,8 +2,6 @@
 
 Use an AI coding agent to iterate on an `arcgis.learn` object detection pipeline after you have already chosen the baseline model and fixed training parameters.
 
-This repo is intentionally small and intentionally opinionated.
-
 It is built around:
 
 - [runtime/prepare.py](./runtime/prepare.py) for environment checks and project prep
@@ -15,7 +13,7 @@ The target use case is peach detection in orchard imagery, but the structure is 
 
 ## What This Repo Does
 
-This repo is for the second half of the workflow:
+This repo is for the second half of a object detection model training workflow:
 
 1. Use Optuna outside this repo to decide the baseline model and fixed training recipe.
 2. Put those fixed choices into this repo.
@@ -71,32 +69,6 @@ Examples:
   "backbone": null
 }
 ```
-
-The validator is a little user-friendly here:
-
-- `resnet50`, `ResNet50`, and `resnet-50` will all normalize to `resnet50`
-- the architecture still needs to be one of the repo-supported ArcGIS model names above
-
-## Project Layout
-
-```text
-README.md
-doctor.ps1
-prepare.ps1
-program.md
-proposal.py
-results.tsv
-train.ps1
-dataset/
-  project_brief.md
-  project_config.json
-  train_export/
-runtime/
-  prepare.py
-  train.py
-```
-
-Run artifacts are written to `.autoresearch/`.
 
 ## Getting Started
 
