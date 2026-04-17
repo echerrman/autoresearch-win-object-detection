@@ -28,6 +28,9 @@ checkpoints/
 *.dlpk
 
 # Local ArcGIS dataset exports
+dataset/train_export/*
+!dataset/train_export/
+!dataset/train_export/README.md
 datasets/*/train_export/*
 !datasets/*/train_export/
 !datasets/*/train_export/README.md

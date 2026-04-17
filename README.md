@@ -2,26 +2,27 @@
 
 Use an AI coding agent to iterate on an `arcgis.learn` object detection pipeline after you have already chosen the baseline model and fixed training parameters.
 
-This repo is for the second half of the workflow:
+This repo is intentionally small and intentionally opinionated.
 
-1. Use Optuna outside this repo to find the model and fixed training recipe you want to start from.
-2. Put that fixed baseline into this repo.
-3. Let an AI agent iterate on constrained pipeline changes one experiment at a time.
+It is built around:
+
+- [prepare.py](./prepare.py) for environment checks and project prep
+- [train.py](./train.py) for the fixed training runner
+- [proposal.py](./proposal.py) as the only file the AI agent should edit during normal research
+- [program.md](./program.md) as the instruction file you point your AI agent at
 
 The target use case is peach detection in orchard imagery, but the structure is reusable for other ArcGIS Learn object detection projects.
 
 ## What This Repo Does
 
-This repo is a guarded research harness for `arcgis.learn`.
+This repo is for the second half of the workflow:
 
-It is designed to help an AI agent test pipeline-level changes such as:
+1. Use Optuna outside this repo to decide the baseline model and fixed training recipe.
+2. Put those fixed choices into this repo.
+3. Run one baseline training experiment with no changes.
+4. Let an AI agent iterate on constrained pipeline improvements one change at a time.
 
-- augmentation policy
-- preprocessing and resize strategy
-- post-processing thresholds used for validation scoring
-- `chip_size`
-
-It is not the place where you should broadly search learning rate, batch size, epochs, or baseline model choice. The intended workflow is to choose those first with Optuna, then lock them here.
+This repo is **not** where you broadly tune learning rate, batch size, epochs, or model selection. It assumes those decisions were already made before you got here.
 
 ## What You Need Before You Start
 
@@ -33,46 +34,80 @@ Bring these with you:
 - an exported training dataset from `Export Training Data For Deep Learning`
 - a baseline model choice and fixed training recipe, ideally selected beforehand with Optuna
 
-At minimum, you should already know:
+Before you start using this repo, Optuna should ideally already have decided:
 
-- which model family/backbone you want to start from
-- the fixed learning rate
-- the fixed batch size
-- the fixed epoch count
-- the validation split
+- the model architecture
+- the backbone
+- the learning rate
+- the batch size
+- the epoch count
+- the starting chip size
+- optionally the validation split if you do not want to use the repo default
 
-## How It Works
+## Supported Model Values
 
-The repo stays intentionally small:
+Use the exact `architecture` and `backbone` format below in `dataset/project_config.json`.
 
-- [prepare.py](./prepare.py)
-  Validates the ArcGIS environment, your dataset workspace, and the immutable research context.
-- [train.py](./train.py)
-  Runs one fixed `arcgis.learn` training experiment and logs the validation result.
-- [proposal.py](./proposal.py)
-  The only file the AI agent should edit during normal research.
-- [program.md](./program.md)
-  The instruction file you point your coding agent at.
+| `architecture` value | `backbone` value | Notes |
+| --- | --- | --- |
+| `FasterRCNN` | ResNet family, such as `resnet18`, `resnet34`, `resnet50`, `resnet101`, or `resnet152` | Good default two-stage detector. |
+| `RetinaNet` | ResNet family, such as `resnet18`, `resnet34`, `resnet50`, `resnet101`, or `resnet152` | Single-stage detector with ResNet-family backbone. |
+| `MaskRCNN` | ResNet family, such as `resnet18`, `resnet34`, `resnet50`, `resnet101`, or `resnet152` | Supported here as a fixed model choice, though it is an instance-segmentation architecture. |
+| `RTDetrV2` | ResNet family, such as `resnet18`, `resnet34`, `resnet50`, `resnet101`, or `resnet152` | ArcGIS docs describe a ResNet-family backbone here. |
+| `YOLOv3` | `null` | In this repo, `YOLOv3` uses its built-in backbone. Do not supply a separate backbone string. |
 
-The human sets the guardrails. The agent proposes and tests one major change at a time inside those guardrails.
+Examples:
+
+```json
+"model": {
+  "architecture": "FasterRCNN",
+  "backbone": "resnet50"
+}
+```
+
+```json
+"model": {
+  "architecture": "YOLOv3",
+  "backbone": null
+}
+```
+
+The validator is a little user-friendly here:
+
+- `resnet50`, `ResNet50`, and `resnet-50` will all normalize to `resnet50`
+- the architecture still needs to be one of the repo-supported ArcGIS model names above
+
+## What The User Actually Edits
+
+For normal setup, the user only needs to touch:
+
+- [dataset/project_brief.md](./dataset/project_brief.md)
+- [dataset/project_config.json](./dataset/project_config.json)
+- [dataset/train_export/](./dataset/train_export/)
+
+Everything else is meant to stay stable unless you are developing the repo itself.
+
+`project_brief.md` is a plain-English note for the AI agent. It is helpful, but you do not need to rewrite all of it.
+
+`project_config.json` is the only JSON file the user needs to edit, and it is intentionally small. It is for the fixed baseline choices only.
 
 ## Project Layout
 
 ```text
+README.md
+doctor.ps1
+prepare.ps1
 prepare.py
-train.py
-proposal.py
 program.md
+proposal.py
 results.tsv
-datasets/<dataset-name>/
+train.ps1
+train.py
+dataset/
   project_brief.md
-  research_context.json
+  project_config.json
   train_export/
 ```
-
-- `project_brief.md` is the plain-English description of the detection problem.
-- `research_context.json` is the machine-readable locked context for the run.
-- `train_export/` holds the ArcGIS export workspace.
 
 Run artifacts are written to `.autoresearch/` and ignored by git.
 
@@ -80,15 +115,30 @@ Run artifacts are written to `.autoresearch/` and ignored by git.
 
 ### 1. Choose the baseline outside this repo
 
-Use Optuna to determine the model and fixed parameters you want to bring into this project.
+Use Optuna to determine the fixed baseline you want to bring into this project.
 
-The normal expectation is:
+At minimum, decide:
 
-- Optuna chooses the baseline model family/backbone.
-- Optuna chooses learning rate, batch size, and epochs.
-- This repo treats those choices as fixed.
+- the model architecture
+- the backbone
+- the learning rate
+- the batch size
+- the epoch count
+- the starting chip size
 
-If you want the AI agent locked to one model only, set `approved_models` in the research context to just that one Optuna-selected option.
+Optional but supported:
+
+- a non-default validation split
+- a pretrained checkpoint path
+
+For our example peach detecting project, Optuna might have already told you:
+
+- architecture: `FasterRCNN`
+- backbone: `resnet50`
+- learning rate: `0.001`
+- batch size: `4`
+- epochs: `20`
+- starting chip size: `320`
 
 ### 2. Clone the repo
 
@@ -101,187 +151,151 @@ cd autoresearch-win-object-detection
 
 From this point on, run the rest of the commands from the repo root in **PowerShell** unless stated otherwise.
 
-### 3. Create a dataset workspace
+### 3. Use the built-in `dataset/` folder
 
-In **PowerShell** or in File Explorer, copy [datasets/example-project](./datasets/example-project/) and rename it to your project name.
+This repo assumes one dataset per clone.
+
+You do **not** need to copy or rename any template folder. Just use the built-in `dataset/` folder that already comes with the repo:
 
 ```text
-datasets/<dataset-name>/
+dataset/
   project_brief.md
-  research_context.json
+  project_config.json
   train_export/
 ```
 
-For our example peach detecting project:
+For our example peach detecting project, that same folder is where you would put the peach project details:
 
 ```text
-datasets/peach-orchard-spring-2026/
+dataset/
   project_brief.md
-  research_context.json
+  project_config.json
   train_export/
 ```
 
-PowerShell example:
+### 4. Copy your ArcGIS export into `dataset/train_export/`
 
-```powershell
-Copy-Item -Recurse .\datasets\example-project .\datasets\peach-orchard-spring-2026
-```
+In **ArcGIS Pro**, run `Export Training Data For Deep Learning` as you normally would.
 
-### 4. Drop in your ArcGIS export
+That ArcGIS tool will create an export folder. Inside that export folder, you will usually see things like:
 
-In **ArcGIS Pro**, run `Export Training Data For Deep Learning` as you normally would. After it finishes, copy the exported training-data workspace into your project folder.
+- an `images` folder
+- a `labels` folder
+- utility files such as `map.txt`, `stats.json`, `esri_accumulated_stats.json`, or `.emd` files
 
-Target folder in this repo:
-
-```text
-datasets/<dataset-name>/train_export/
-```
-
-For our example peach detecting project:
+Copy the **contents** of that ArcGIS export folder into this repo folder:
 
 ```text
-datasets/peach-orchard-spring-2026/train_export/
+dataset/train_export/
 ```
 
-If your ArcGIS export already contains folders and files such as `images`, `labels`, and metadata files, copy those contents into `train_export/`.
+Do **not** copy the outer ArcGIS export folder itself as an extra nested folder.
 
-### 5. Fill in the two project files
+For our example peach detecting project, after copying, it should look roughly like:
+
+```text
+dataset/train_export/
+  images/
+  labels/
+  map.txt
+  stats.json
+```
+
+### 5. Fill in `project_brief.md` and `project_config.json`
 
 Open these two files in your editor:
 
-- [datasets/example-project/project_brief.md](./datasets/example-project/project_brief.md)
-- [datasets/example-project/research_context.json](./datasets/example-project/research_context.json)
+- [dataset/project_brief.md](./dataset/project_brief.md)
+- [dataset/project_config.json](./dataset/project_config.json)
 
-For your real project, that usually means editing:
+#### `project_brief.md`
 
-```text
-datasets/<dataset-name>/project_brief.md
-datasets/<dataset-name>/research_context.json
-```
+This file is mainly for helping the AI agent understand the dataset better.
 
-For our example peach detecting project:
+You do not have to rewrite everything. If you want the easiest startup, just replace the obvious example details.
 
-```text
-datasets/peach-orchard-spring-2026/project_brief.md
-datasets/peach-orchard-spring-2026/research_context.json
-```
+For our example peach detecting project, the brief might say things like:
 
-`project_brief.md` should explain the real-world context, such as:
+- the target is peaches
+- the imagery is top-down drone imagery
+- fruit can be small, clustered, and partially occluded
+- misses are especially bad when peaches are hidden by leaves
 
-- what you are detecting
-- where the imagery came from
-- what makes the task hard
-- whether misses or false positives are more costly
+#### `project_config.json`
 
-For our example peach detecting project:
+This file holds the fixed baseline choices that the AI agent must not change.
 
-```md
-# Project Brief
+If you are using `YOLOv3`, set `"backbone": null`. For the ResNet-based models, use a ResNet-family backbone string such as `resnet50`.
 
-## Detection Objective
-
-Detect peaches in high-resolution drone imagery of a commercial orchard.
-
-## Scene Context
-
-- Imagery source: drone orthomosaic
-- Viewpoint: top-down / near nadir
-- Target object: peaches
-- Common issues: leaf occlusion, clustered fruit, shadows, bright sunlit canopy
-
-## Validation Priorities
-
-1. improve validation mAP
-2. keep useful precision
-3. avoid missing partially occluded peaches
-```
-
-`research_context.json` should lock in:
-
-- the Optuna-selected model family/backbone
-- the fixed learning rate
-- the fixed batch size
-- the fixed epochs
-- the validation split
-- the baseline `chip_size`
-- the current best validation metrics, if known
-
-For our example peach detecting project:
+The default template is intentionally short:
 
 ```json
 {
-  "project_name": "peach-orchard-spring-2026",
-  "framework": "arcgis.learn",
-  "project_brief_path": "project_brief.md",
-  "dataset": {
-    "train_export_path": "train_export",
-    "dataset_type": "PASCAL_VOC_rectangles"
-  },
-  "baseline_model": {
+  "project_name": "peach-orchard-example",
+  "model": {
     "architecture": "FasterRCNN",
-    "backbone": "resnet50",
-    "pretrained_path": null
-  },
-  "approved_models": {
-    "FasterRCNN": [
-      "resnet50"
-    ]
+    "backbone": "resnet50"
   },
   "fixed_parameters": {
     "learning_rate": 0.001,
     "batch_size": 4,
-    "epochs": 20,
-    "validation_split": 0.1
+    "epochs": 20
   },
-  "baseline_pipeline": {
-    "chip_size": 320
-  },
-  "current_best_metrics": {
-    "map": 0.42,
-    "precision": 0.71,
-    "recall": 0.64
-  },
-  "allowed_change_areas": [
-    "augmentation",
-    "preprocessing",
-    "postprocessing",
-    "chip_size"
-  ],
-  "prohibited_actions": [
-    "Do not change learning_rate",
-    "Do not change batch_size",
-    "Do not change epochs",
-    "Do not access a test dataset",
-    "Do not modify labels or add external data"
-  ]
+  "chip_size": 320
 }
 ```
 
+For our example peach detecting project, you might set:
+
+```json
+{
+  "project_name": "peach-orchard-spring-2026",
+  "model": {
+    "architecture": "FasterRCNN",
+    "backbone": "resnet50"
+  },
+  "fixed_parameters": {
+    "learning_rate": 0.001,
+    "batch_size": 4,
+    "epochs": 20
+  },
+  "chip_size": 320
+}
+```
+
+If you want to override defaults later, you can also add optional fields such as:
+
+- `validation_split`
+- `pretrained_path`
+
 ### 6. Check your ArcGIS environment
 
-In **PowerShell** at the repo root, run:
+Still in **PowerShell** at the repo root, run:
 
 ```powershell
 .\doctor.ps1
 ```
 
-This confirms that ArcGIS Pro Python, `arcgis.learn`, and the required dependencies are available.
+This checks that ArcGIS Pro Python, `arcgis.learn`, `arcpy`, and the required dependencies are available.
 
-### 7. Validate the project workspace
+This step may take around **20 to 40 seconds** on a normal machine because it launches ArcGIS Pro Python and imports the deep learning stack.
+
+### 7. Prepare the project
 
 Still in **PowerShell** at the repo root, run:
 
 ```powershell
-.\prepare.ps1 --dataset <dataset-name>
+.\prepare.ps1
 ```
 
-For our example peach detecting project:
+This validates:
 
-```powershell
-.\prepare.ps1 --dataset peach-orchard-spring-2026
-```
+- the ArcGIS environment
+- `dataset/project_config.json`
+- `dataset/project_brief.md`
+- `dataset/train_export/`
 
-This validates the dataset folder, the locked context, and the active project selection.
+If everything looks good, it writes the active-project state used by the training runner.
 
 ### 8. Dry-run the runner
 
@@ -291,15 +305,28 @@ Still in **PowerShell** at the repo root, run:
 .\train.ps1 --dry-run
 ```
 
-This checks that the runner can load your active project and proposal without starting a real training job.
+This checks that the runner can load the active project and the current proposal without starting a real training job.
 
-### 9. Run one experiment
+### 9. Run one baseline experiment
 
 Still in **PowerShell** at the repo root, run:
 
 ```powershell
 .\train.ps1
 ```
+
+This first run should be the plain baseline run using your fixed model and fixed parameters.
+
+In other words, before the AI tries to improve anything, let the repo run one experiment with:
+
+- your fixed architecture
+- your fixed backbone
+- your fixed learning rate
+- your fixed batch size
+- your fixed epochs
+- your starting chip size
+
+That gives you the baseline result for this repo's own validation workflow.
 
 Optional infrastructure-only smoke test:
 
@@ -316,16 +343,23 @@ Once the setup works, start your coding agent in this repo and point it at [prog
 Example starter prompt:
 
 ```text
-Read program.md and the active dataset workspace, then start the next constrained research iteration.
+Read program.md, dataset/project_brief.md, and dataset/project_config.json, then start the next constrained research iteration.
 Generate 3-5 candidate pipeline changes, choose the strongest one, update proposal.py, run the experiment, and continue within the repo's fixed constraints.
 ```
 
 For our example peach detecting project:
 
 ```text
-Read program.md and the active peach-orchard-spring-2026 dataset workspace, then start the next constrained research iteration.
-Focus on improving peach detection in top-down orchard drone imagery. Generate 3-5 candidate pipeline changes, choose the strongest one, update proposal.py, run the experiment, and continue within the repo's fixed constraints.
+Read program.md, dataset/project_brief.md, and dataset/project_config.json, then start the next constrained research iteration.
+This project is for detecting peaches in top-down orchard drone imagery. Generate 3-5 candidate pipeline changes, choose the strongest one, update proposal.py, run the experiment, and continue within the repo's fixed constraints.
 ```
+
+If you want the agent to stop at a certain point, say that directly in your prompt. For example:
+
+- `Stop after 10 iterations.`
+- `Stop after 5 hours.`
+- `Stop if validation precision reaches 0.85.`
+- `Stop if you have three consecutive non-improving experiments.`
 
 ## What The Agent Is Allowed To Change
 
@@ -333,8 +367,10 @@ During normal research, the agent should edit only [proposal.py](./proposal.py).
 
 The runner enforces the important constraints in code.
 
-Fixed and normally immutable:
+Fixed and immutable:
 
+- model architecture
+- backbone
 - learning rate
 - batch size
 - epochs
@@ -345,8 +381,6 @@ Allowed research levers:
 - preprocessing resize strategy
 - post-processing thresholds used for validation scoring
 - `chip_size`
-
-Model and backbone selection should normally already be chosen before this repo, for example with Optuna. If you intentionally want to permit limited model switching, you can allow that in `approved_models`, but the default recommendation is to keep it narrow.
 
 Explicitly disallowed:
 
@@ -361,7 +395,7 @@ Each run produces a reproducible research record:
 
 - one new row in [results.tsv](./results.tsv)
 - one run folder under `.autoresearch/runs/<run-id>/`
-- snapshots of the active context, proposal, and project brief
+- snapshots of the active config, proposal, and brief
 - a machine-readable run summary
 
 The main metric is validation `mAP`. Precision and recall are also logged when they are available from the ArcGIS Learn model object.

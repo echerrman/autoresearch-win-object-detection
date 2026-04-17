@@ -1,5 +1,9 @@
 # Project Brief
 
+This file is here to help the AI agent understand your dataset better.
+
+You do not need to rewrite all of it. If you want the fastest possible setup, you can leave most of this file alone and just replace the obvious example details.
+
 ## Detection Objective
 
 Detect peaches in high-resolution orchard imagery.
@@ -25,7 +29,7 @@ Detect peaches in high-resolution orchard imagery.
 
 ## Notes For The Agent
 
-- The baseline model and fixed training parameters were chosen before this repo is used, ideally with Optuna.
-- prefer simple, high-impact pipeline changes
-- keep experiments independently testable
-- do not touch fixed training knobs from the research context
+- The baseline model and fixed training parameters were chosen before this repo is used.
+- Prefer simple, high-impact pipeline changes.
+- Keep experiments independently testable.
+- Do not touch the fixed model or fixed training parameters from `project_config.json`.

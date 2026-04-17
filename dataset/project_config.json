@@ -1,0 +1,13 @@
+{
+  "project_name": "peach-orchard-example",
+  "model": {
+    "architecture": "FasterRCNN",
+    "backbone": "resnet50"
+  },
+  "fixed_parameters": {
+    "learning_rate": 0.001,
+    "batch_size": 4,
+    "epochs": 20
+  },
+  "chip_size": 320
+}

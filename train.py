@@ -22,7 +22,14 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from prepare import RESULTS_HEADER, RESULTS_PATH, STATE_DIR, ensure_state_dir, load_active_project, load_json
+from prepare import (
+    RESULTS_HEADER,
+    RESULTS_PATH,
+    STATE_DIR,
+    ensure_state_dir,
+    load_active_project,
+    load_and_validate_project_config,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent
 PROPOSAL_PATH = REPO_ROOT / "proposal.py"
@@ -34,16 +41,12 @@ SUPPORTED_PRIMARY_CHANGES = {
     "augmentation",
     "preprocessing",
     "postprocessing",
-    "sampling",
-    "model_selection",
     "chip_size",
 }
 ACTIVE_SECTION_MAP = {
     "augmentation": "augmentation",
     "preprocessing": "preprocessing",
     "postprocessing": "postprocessing",
-    "sampling": "sampling",
-    "model_selection": "model_selection",
     "chip_size": "chip_size_override",
 }
 SUPPORTED_AUGMENTATION_KWARGS = {
@@ -83,18 +86,18 @@ def ensure_results_file() -> None:
         )
 
 
-def load_context_from_active_project(dataset_override: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+def load_project_from_active_project(project_override: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     active_project = load_active_project()
-    if dataset_override and Path(dataset_override).name != active_project["dataset_name"]:
-        raise ValueError(
-            "train.py currently runs only against the prepared active project. "
-            "Run prepare.py again if you want to switch datasets."
-        )
-    context = load_json(Path(active_project["research_context_path"]))
-    context["project_brief_path"] = active_project["project_brief_path"]
-    context["dataset"]["train_export_path"] = active_project["train_export_path"]
-    context["dataset_dir"] = active_project["dataset_dir"]
-    return active_project, context
+    if project_override:
+        requested = Path(project_override).resolve()
+        active = Path(active_project["project_dir"]).resolve()
+        if requested != active:
+            raise ValueError(
+                "train.py runs against the prepared active project. "
+                "Run .\\prepare.ps1 again if you want to switch projects."
+            )
+    project_config = load_and_validate_project_config(Path(active_project["project_dir"]))
+    return active_project, project_config
 
 
 def load_proposal() -> dict[str, Any]:
@@ -145,8 +148,6 @@ def validate_proposal(proposal: dict[str, Any], context: dict[str, Any]) -> dict
         "augmentation",
         "preprocessing",
         "postprocessing",
-        "sampling",
-        "model_selection",
         "chip_size_override",
     }
     missing = sorted(required_fields - set(proposal))
@@ -154,6 +155,17 @@ def validate_proposal(proposal: dict[str, Any], context: dict[str, Any]) -> dict
         raise ValueError(f"proposal.py is missing required fields: {missing}")
 
     _scan_for_disallowed_keys(proposal)
+
+    if _is_active_section(proposal.get("sampling")):
+        raise ValueError(
+            "Sampling is not part of the simplified user workflow. "
+            "Choose augmentation, preprocessing, postprocessing, or chip_size."
+        )
+    if _is_active_section(proposal.get("model_selection")):
+        raise ValueError(
+            "The baseline model is fixed in this repo. "
+            "Choose your model before you start, then keep model selection out of proposal.py."
+        )
 
     primary_change = proposal["primary_change"]
     if primary_change not in SUPPORTED_PRIMARY_CHANGES:
@@ -178,9 +190,9 @@ def validate_proposal(proposal: dict[str, Any], context: dict[str, Any]) -> dict
             )
 
     allowed_change_areas = set(context.get("allowed_change_areas", []))
-    if primary_change not in {"baseline"} and primary_change not in allowed_change_areas:
+    if primary_change != "baseline" and primary_change not in allowed_change_areas:
         raise ValueError(
-            f"primary_change '{primary_change}' is not allowed by the active context."
+            f"primary_change '{primary_change}' is not allowed by the active project."
         )
 
     augmentation = proposal.get("augmentation")
@@ -221,29 +233,6 @@ def validate_proposal(proposal: dict[str, Any], context: dict[str, Any]) -> dict
                 f"Supported keys are {sorted(SUPPORTED_POSTPROCESSING_KEYS)}."
             )
 
-    if proposal.get("sampling"):
-        raise ValueError(
-            "Sampling proposals are scaffolded in the proposal surface but not yet executable "
-            "in the fixed runner. Choose augmentation, preprocessing, postprocessing, model_selection, or chip_size."
-        )
-
-    model_selection = proposal.get("model_selection")
-    if model_selection:
-        if not isinstance(model_selection, dict):
-            raise ValueError("proposal.model_selection must be an object.")
-        architecture = model_selection.get("architecture")
-        backbone = model_selection.get("backbone")
-        approved_models = context.get("approved_models", {})
-        if architecture not in approved_models:
-            raise ValueError(
-                f"Architecture '{architecture}' is not approved by the active context."
-            )
-        approved_backbones = approved_models.get(architecture)
-        if isinstance(approved_backbones, list) and backbone not in approved_backbones:
-            raise ValueError(
-                f"Backbone '{backbone}' is not approved for architecture '{architecture}'."
-            )
-
     chip_size_override = proposal.get("chip_size_override")
     if chip_size_override is not None:
         if not isinstance(chip_size_override, int) or chip_size_override <= 0:
@@ -262,24 +251,17 @@ def build_transforms(augmentation: dict[str, Any] | None):
 
 
 def resolve_runtime_configuration(context: dict[str, Any], proposal: dict[str, Any]) -> dict[str, Any]:
-    baseline_model = context["baseline_model"]
+    model = context["model"]
     baseline_pipeline = context["baseline_pipeline"]
     fixed_parameters = context["fixed_parameters"]
-
-    model_selection = proposal.get("model_selection") or {}
-    architecture = model_selection.get("architecture", baseline_model["architecture"])
-    backbone = model_selection.get("backbone", baseline_model.get("backbone"))
-    pretrained_path = model_selection.get(
-        "pretrained_path", baseline_model.get("pretrained_path")
-    )
 
     preprocessing = proposal.get("preprocessing") or {}
     postprocessing = proposal.get("postprocessing") or {}
 
     return {
-        "architecture": architecture,
-        "backbone": backbone,
-        "pretrained_path": pretrained_path,
+        "architecture": model["architecture"],
+        "backbone": model.get("backbone"),
+        "pretrained_path": model.get("pretrained_path"),
         "chip_size": proposal.get("chip_size_override") or baseline_pipeline["chip_size"],
         "resize_to": preprocessing.get("resize_to", baseline_pipeline.get("resize_to")),
         "detect_thresh": postprocessing.get(
@@ -292,8 +274,8 @@ def resolve_runtime_configuration(context: dict[str, Any], proposal: dict[str, A
         "batch_size": fixed_parameters["batch_size"],
         "epochs": fixed_parameters["epochs"],
         "validation_split": fixed_parameters["validation_split"],
-        "fit_kwargs": fixed_parameters.get("fit", {}),
-        "prepare_data_kwargs": fixed_parameters.get("prepare_data", {}),
+        "fit_kwargs": dict(context.get("fit_parameters", {})),
+        "dataset_type": context["dataset"]["dataset_type"],
     }
 
 
@@ -305,23 +287,16 @@ def import_arcgis_stack():
 
 
 def build_data(arcgis_learn, context: dict[str, Any], proposal: dict[str, Any], run_dir: Path, runtime: dict[str, Any]):
-    dataset = context["dataset"]
-    prepare_data_kwargs = dict(runtime["prepare_data_kwargs"])
-    if "dataset_type" not in prepare_data_kwargs and dataset.get("dataset_type"):
-        prepare_data_kwargs["dataset_type"] = dataset["dataset_type"]
-    if dataset.get("class_mapping") and "class_mapping" not in prepare_data_kwargs:
-        prepare_data_kwargs["class_mapping"] = dataset["class_mapping"]
-
     transforms = build_transforms(proposal.get("augmentation"))
     data = arcgis_learn.prepare_data(
-        path=dataset["train_export_path"],
+        path=context["dataset"]["train_export_path"],
         chip_size=runtime["chip_size"],
         val_split_pct=runtime["validation_split"],
         batch_size=runtime["batch_size"],
         transforms=transforms,
         resize_to=runtime["resize_to"],
         working_dir=str(run_dir),
-        **prepare_data_kwargs,
+        dataset_type=runtime["dataset_type"],
     )
     return data
 
@@ -342,7 +317,10 @@ def build_model(arcgis_learn, data, runtime: dict[str, Any]):
 
 
 def extract_precision_recall(model: Any) -> tuple[Any, Any]:
-    for candidate in (getattr(model, "_model_metrics", None), getattr(model, "_get_model_metrics", None)):
+    for candidate in (
+        getattr(model, "_model_metrics", None),
+        getattr(model, "_get_model_metrics", None),
+    ):
         metrics = candidate() if callable(candidate) else candidate
         if isinstance(metrics, dict):
             precision = None
@@ -384,12 +362,14 @@ def append_result(row: dict[str, Any]) -> None:
         writer.writerow(row)
 
 
-def snapshot_run_inputs(run_dir: Path, active_project: dict[str, Any], context: dict[str, Any], proposal: dict[str, Any]) -> None:
+def snapshot_run_inputs(
+    run_dir: Path, active_project: dict[str, Any], context: dict[str, Any], proposal: dict[str, Any]
+) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "active_project.json").write_text(
         json.dumps(active_project, indent=2), encoding="utf-8"
     )
-    (run_dir / "research_context.snapshot.json").write_text(
+    (run_dir / "project_config.snapshot.json").write_text(
         json.dumps(context, indent=2), encoding="utf-8"
     )
     (run_dir / "proposal.snapshot.json").write_text(
@@ -414,11 +394,15 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     ensure_state_dir()
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
-    active_project, context = load_context_from_active_project(args.dataset)
+    project_override = args.project or args.dataset
+    active_project, context = load_project_from_active_project(project_override)
     proposal = validate_proposal(load_proposal(), context)
     runtime = resolve_runtime_configuration(context, proposal)
 
-    run_id = args.run_id or f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{slugify(proposal['title'])}"
+    run_id = args.run_id or (
+        f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+        f"{slugify(proposal['title'])}"
+    )
     run_dir = RUNS_DIR / run_id
     snapshot_run_inputs(run_dir, active_project, context, proposal)
 
@@ -427,10 +411,9 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             "run_id": run_id,
             "mode": "dry-run",
             "timestamp": utc_now_iso(),
-            "runtime": runtime,
+            "project_name": context["project_name"],
             "proposal_title": proposal["title"],
             "primary_change": proposal["primary_change"],
-            "dataset": active_project["dataset_name"],
             "architecture": runtime["architecture"],
             "backbone": runtime["backbone"],
             "chip_size": runtime["chip_size"],
@@ -472,24 +455,14 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         per_class_map = None
 
     precision, recall = extract_precision_recall(model)
-    prior_best = max(
-        [
-            candidate
-            for candidate in (
-                read_best_map_from_results(),
-                context.get("current_best_metrics", {}).get("map"),
-            )
-            if isinstance(candidate, (int, float))
-        ],
-        default=None,
-    )
+    prior_best = read_best_map_from_results()
     status = "smoke" if args.smoke_test else choose_status(prior_best, val_map)
     notes = proposal["description"]
 
     summary = {
         "run_id": run_id,
         "timestamp": utc_now_iso(),
-        "dataset": active_project["dataset_name"],
+        "project_name": context["project_name"],
         "proposal_title": proposal["title"],
         "primary_change": proposal["primary_change"],
         "architecture": runtime["architecture"],
@@ -555,9 +528,21 @@ def format_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write_crash_summary(run_id: str, error: str, context: dict[str, Any] | None, proposal: dict[str, Any] | None) -> dict[str, Any]:
+def write_crash_summary(
+    run_id: str, error: str, context: dict[str, Any] | None, proposal: dict[str, Any] | None
+) -> dict[str, Any]:
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    architecture = ""
+    backbone = ""
+    chip_size = ""
+    if context:
+        architecture = context.get("model", {}).get("architecture", "")
+        backbone = context.get("model", {}).get("backbone", "")
+        chip_size = context.get("baseline_pipeline", {}).get("chip_size", "")
+    if proposal and proposal.get("chip_size_override") is not None:
+        chip_size = proposal["chip_size_override"]
+
     summary = {
         "run_id": run_id,
         "timestamp": utc_now_iso(),
@@ -565,21 +550,9 @@ def write_crash_summary(run_id: str, error: str, context: dict[str, Any] | None,
         "error": error,
         "proposal_title": proposal.get("title") if proposal else "",
         "primary_change": proposal.get("primary_change") if proposal else "",
-        "architecture": (
-            proposal.get("model_selection", {}).get("architecture")
-            if proposal and proposal.get("model_selection")
-            else context.get("baseline_model", {}).get("architecture") if context else ""
-        ),
-        "backbone": (
-            proposal.get("model_selection", {}).get("backbone")
-            if proposal and proposal.get("model_selection")
-            else context.get("baseline_model", {}).get("backbone") if context else ""
-        ),
-        "chip_size": (
-            proposal.get("chip_size_override")
-            if proposal and proposal.get("chip_size_override") is not None
-            else context.get("baseline_pipeline", {}).get("chip_size") if context else ""
-        ),
+        "architecture": architecture,
+        "backbone": backbone,
+        "chip_size": chip_size,
         "val_map": "",
         "val_precision": "",
         "val_recall": "",
@@ -593,8 +566,15 @@ def write_crash_summary(run_id: str, error: str, context: dict[str, Any] | None,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a fixed ArcGIS Learn autoresearch experiment")
-    parser.add_argument("--dataset", help="Optional dataset name. Must match the prepared active project.")
-    parser.add_argument("--dry-run", action="store_true", help="Validate context and proposal without training.")
+    parser.add_argument(
+        "--project",
+        help="Optional project folder path. Must match the prepared active project.",
+    )
+    parser.add_argument(
+        "--dataset",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Validate project and proposal without training.")
     parser.add_argument(
         "--smoke-test",
         action="store_true",
@@ -610,12 +590,15 @@ def main() -> int:
     proposal = None
     run_id = args.run_id or f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-startup"
     try:
-        _, context = load_context_from_active_project(args.dataset)
+        _, context = load_project_from_active_project(args.project or args.dataset)
         proposal = load_proposal()
         if args.run_id:
             run_id = args.run_id
         else:
-            run_id = f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{slugify(proposal.get('title', 'experiment'))}"
+            run_id = (
+                f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+                f"{slugify(proposal.get('title', 'experiment'))}"
+            )
         summary = run_experiment(args)
         print(format_summary(summary))
         return 0

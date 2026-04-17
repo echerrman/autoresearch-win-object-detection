@@ -2,16 +2,16 @@
 
 You are an automated research agent improving an ArcGIS Learn object detection workflow.
 
-This repo starts after the baseline model and fixed training parameters have already been chosen, for example with Optuna.
+This repo starts after the human has already chosen the baseline model and fixed training parameters, for example with Optuna.
 
 ## Mission
 
-Improve validation performance for orchard object detection through pipeline-level modifications, while keeping the core training recipe fixed.
+Improve validation performance for the active object detection project through pipeline-level modifications, while keeping the core training recipe fixed.
 
 The active project is defined by:
 
-- `datasets/<dataset-name>/project_brief.md`
-- `datasets/<dataset-name>/research_context.json`
+- `dataset/project_brief.md`
+- `dataset/project_config.json`
 - `.autoresearch/active_project.json`
 
 Read all three before suggesting or implementing a new run.
@@ -25,8 +25,8 @@ Treat these as fixed support surfaces:
 - `prepare.py`
 - `train.py`
 - `program.md`
-- the active research context
-- the project brief
+- `dataset/project_config.json`
+- `dataset/project_brief.md`
 
 ## Hard Constraints
 
@@ -35,13 +35,12 @@ The runner enforces these constraints in code:
 - Do not change learning rate.
 - Do not change batch size.
 - Do not change epochs.
+- Do not change the baseline model or backbone.
 - Do not access or use a test dataset.
 - Do not modify labels.
 - Do not add external data.
 
 `chip_size` is allowed to change.
-
-Architecture and backbone should normally already be fixed before this repo is used. If the human has intentionally approved multiple model options in the active research context, you may switch only within that approved list.
 
 ## Allowed Change Areas
 
@@ -50,16 +49,13 @@ You may explore one major change per experiment in these areas:
 - augmentation policy
 - preprocessing resize strategy
 - post-processing thresholds used for validation scoring
-- supported architecture/backbone switching when the context explicitly allows it
 - `chip_size`
-
-The proposal surface also includes a sampling hook, but the fixed runner will reject unsupported sampling policies until a dataset-safe implementation exists. Do not rely on sampling changes unless the runner explicitly supports them.
 
 ## Proposal Workflow
 
 For each iteration:
 
-1. Read the active brief, immutable context, and previous results.
+1. Read the active brief, fixed project config, and previous results.
 2. Generate 3-5 candidate modifications.
 3. Rank them by likely impact on the current failure mode.
 4. Choose the top candidate.
@@ -86,8 +82,6 @@ The only valid `primary_change` values are:
 - `augmentation`
 - `preprocessing`
 - `postprocessing`
-- `sampling`
-- `model_selection`
 - `chip_size`
 
 ## Research Priorities
@@ -107,17 +101,17 @@ Tie-breakers:
 Favor high-impact interventions that help with:
 
 - small objects
-- clustered fruit
+- clustered targets
 - partial occlusion
 - lighting variability
-- orchard background confusion
+- background confusion
 
 ## Run Commands
 
 Use the ArcGIS Pro wrappers from the repo root:
 
 ```powershell
-.\prepare.ps1 --dataset <dataset-name>
+.\prepare.ps1
 .\train.ps1
 ```
 

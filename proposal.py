@@ -10,33 +10,30 @@ Valid primary_change values:
     - augmentation
     - preprocessing
     - postprocessing
-    - sampling
-    - model_selection
     - chip_size
 
 Forbidden changes are enforced by train.py:
     - learning_rate
     - batch_size
     - epochs
+    - baseline model selection
     - test dataset access
 """
 
 PROPOSAL = {
     "title": "Baseline control",
-    "description": "Run the approved baseline without pipeline changes.",
+    "description": "Run the fixed baseline without pipeline changes.",
     "rationale": (
-        "Every research loop needs a fresh control so validation improvements can be "
-        "attributed to one explicit pipeline change."
+        "The first run should establish a clean baseline with the user's chosen model "
+        "and fixed parameters before the agent begins trying improvements."
     ),
     "implementation_details": (
-        "No augmentation, preprocessing, postprocessing, model-selection, sampling, "
-        "or chip-size overrides are enabled in this baseline proposal."
+        "No augmentation, preprocessing, postprocessing, or chip-size overrides are "
+        "enabled in this baseline proposal."
     ),
     "primary_change": "baseline",
     "augmentation": None,
     "preprocessing": None,
     "postprocessing": None,
-    "sampling": None,
-    "model_selection": None,
     "chip_size_override": None,
 }
