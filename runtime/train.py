@@ -31,7 +31,7 @@ from prepare import (
     load_and_validate_project_config,
 )
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 PROPOSAL_PATH = REPO_ROOT / "proposal.py"
 RUNS_DIR = STATE_DIR / "runs"
 EPSILON = 1e-6

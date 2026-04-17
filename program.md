@@ -22,8 +22,8 @@ Read all three before suggesting or implementing a new run.
 
 Treat these as fixed support surfaces:
 
-- `prepare.py`
-- `train.py`
+- `runtime/prepare.py`
+- `runtime/train.py`
 - `program.md`
 - `dataset/project_config.json`
 - `dataset/project_brief.md`

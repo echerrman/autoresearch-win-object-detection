@@ -12,7 +12,7 @@ Valid primary_change values:
     - postprocessing
     - chip_size
 
-Forbidden changes are enforced by train.py:
+Forbidden changes are enforced by the fixed training runner:
     - learning_rate
     - batch_size
     - epochs

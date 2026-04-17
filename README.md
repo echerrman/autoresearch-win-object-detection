@@ -6,8 +6,8 @@ This repo is intentionally small and intentionally opinionated.
 
 It is built around:
 
-- [prepare.py](./prepare.py) for environment checks and project prep
-- [train.py](./train.py) for the fixed training runner
+- [runtime/prepare.py](./runtime/prepare.py) for environment checks and project prep
+- [runtime/train.py](./runtime/train.py) for the fixed training runner
 - [proposal.py](./proposal.py) as the only file the AI agent should edit during normal research
 - [program.md](./program.md) as the instruction file you point your AI agent at
 
@@ -95,16 +95,17 @@ For normal setup, the user only needs to touch:
 README.md
 doctor.ps1
 prepare.ps1
-prepare.py
 program.md
 proposal.py
 results.tsv
 train.ps1
-train.py
 dataset/
   project_brief.md
   project_config.json
   train_export/
+runtime/
+  prepare.py
+  train.py
 ```
 
 Run artifacts are written to `.autoresearch/`.
@@ -189,7 +190,7 @@ dataset/train_export/
   images/
   labels/
   map.txt
-  stats.txt
+  stats.json
 ```
 
 ### 5. Fill in `project_brief.md` and `project_config.json`

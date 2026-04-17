@@ -10,5 +10,5 @@ if (-not (Test-Path $propy)) {
     throw "ArcGIS Pro Python launcher not found at $propy"
 }
 
-& $propy (Join-Path $repoRoot 'train.py') @PassThruArgs
+& $propy (Join-Path $repoRoot 'runtime\train.py') @PassThruArgs
 exit $LASTEXITCODE

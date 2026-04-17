@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROJECT_DIR = REPO_ROOT / "dataset"
 PROJECT_BRIEF_FILENAME = "project_brief.md"
 PROJECT_CONFIG_FILENAME = "project_config.json"
