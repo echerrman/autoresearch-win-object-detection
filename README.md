@@ -77,18 +77,6 @@ The validator is a little user-friendly here:
 - `resnet50`, `ResNet50`, and `resnet-50` will all normalize to `resnet50`
 - the architecture still needs to be one of the repo-supported ArcGIS model names above
 
-## Getting Started
-
-For normal setup, the user only needs to touch:
-
-- [dataset/project_brief.md](./dataset/project_brief.md)
-- [dataset/project_config.json](./dataset/project_config.json)
-- [dataset/train_export/](./dataset/train_export/)
-
-`project_brief.md` is a plain-English note for the AI agent. It is helpful, but you do not need to rewrite all of it.
-
-`project_config.json` is the only JSON file the user needs to edit.
-
 ## Project Layout
 
 ```text
@@ -109,6 +97,18 @@ runtime/
 ```
 
 Run artifacts are written to `.autoresearch/`.
+
+## Getting Started
+
+For normal setup, the user only needs to touch:
+
+- [dataset/project_brief.md](./dataset/project_brief.md)
+- [dataset/project_config.json](./dataset/project_config.json)
+- [dataset/train_export/](./dataset/train_export/)
+
+`project_brief.md` is a plain-English note for the AI agent. It is helpful, but you do not need to rewrite all of it.
+
+`project_config.json` is the only JSON file the user needs to edit.
 
 ## Quick Start
 
